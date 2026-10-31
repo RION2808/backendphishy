@@ -116,7 +116,12 @@ def find_brand_in_labels(labels: list) -> str | None:
     e.g. "fedex-package-redelivery-support" or "sbi.secure-login.in".
     """
     for label in labels:
-        tokens = [t for t in re.split(r"[-_]+", label) if t]
+        raw_tokens = [t for t in re.split(r"[-_]+", label) if t]
+        # Also check each word with look-alike digits swapped back
+        # ("paypa1" -> "paypal", "g00gle" -> "google").
+        tokens = list(dict.fromkeys(
+            raw_tokens + [t.translate(CHARACTER_SUBSTITUTIONS) for t in raw_tokens]
+        ))
         for brand in BRAND_DOMAINS:
             if brand in tokens:
                 return brand

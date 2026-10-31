@@ -186,10 +186,16 @@ def analyze_security(
         item.get("findings") for item in url_results
     )
 
+    # A link that was actually parsed and came back clean is a real (low-risk)
+    # result, not "no data". Only call it inconclusive when nothing at all
+    # could be assessed.
+    has_url_checked = any(item.get("valid") for item in url_results)
+
     inconclusive = (
         nlp_score is None
         and not has_rule_evidence
         and not has_url_evidence
+        and not has_url_checked
     )
 
     # Calculate the combined score.
@@ -245,20 +251,27 @@ def analyze_security(
         })
 
     # Determine which components actually contributed.
+    
+    # Determine which components actually contributed.
     available_components = [
-        name for name, score in components.items()
+        name.replace("_score", "")
+        for name, score in components.items()
         if score is not None
     ]
 
-    available_components = [
-        name.replace("_score", "")
-        for name in available_components
-    ]
+    # Map singular component names to the expected plural names.
+    component_names = {
+        "nlp": "nlp",
+        "rule": "rules",
+        "url": "urls",
+    }
 
     missing_components = [
-        name for name in ("nlp", "rules", "urls")
+        component_names[name]
+        for name in ("nlp", "rule", "url")
         if name not in available_components
     ]
+
 
     # Link verification status is separate from the phishing risk level.
     has_shortened_url = any(

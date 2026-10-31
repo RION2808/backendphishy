@@ -1,5 +1,7 @@
 import re
 
+from .multilingual_rules import MULTILINGUAL_PATTERNS
+
 
 RULES = {
     "urgency_pressure": {
@@ -119,6 +121,20 @@ RULES = {
 }
 
 
+# Merge Hindi / Kannada / romanised-Hindi patterns into the English rules.
+for _name, _extra in MULTILINGUAL_PATTERNS.items():
+    RULES[_name]["patterns"] = list(RULES[_name]["patterns"]) + _extra
+
+
+def _normalize(text: str) -> str:
+    """NFC-normalise, turn Indic digits into ASCII, drop zero-width spaces."""
+    import unicodedata
+    digits = {ord(c): str(i) for i, c in enumerate("०१२३४५६७८९")}
+    digits.update({ord(c): str(i) for i, c in enumerate("೦೧೨೩೪೫೬೭೮೯")})
+    text = unicodedata.normalize("NFC", text or "")
+    return text.replace("\u200b", "").replace("\ufeff", "").translate(digits)
+
+
 def analyze_rules(message: str) -> dict:
     """
     Identify configured social-engineering signals.
@@ -126,7 +142,7 @@ def analyze_rules(message: str) -> dict:
     This is a rule-based signal detector, not a final phishing verdict.
     """
 
-    message = message or ""
+    message = _normalize(message)
 
     findings = []
     evidence = []

@@ -26,6 +26,18 @@ SUSPICIOUS_SCHEMES = {
     "javascript", "data", "file", "vbscript",
 }
 
+# Cheap / abused TLDs. Not proof of anything alone, but common in scam links.
+SUSPICIOUS_TLDS = {
+    "xyz", "top", "icu", "tk", "ml", "ga", "cf", "gq", "click", "link",
+    "vip", "buzz", "cyou", "rest", "monster", "work", "support",
+}
+
+# Words in the path/query that ask for logins or personal details.
+SENSITIVE_PATH_WORDS = {
+    "login", "signin", "verify", "verification", "otp", "kyc", "password",
+    "confirm", "payment", "secure", "update", "refund", "reschedule",
+}
+
 
 def get_registered_domain(host: str) -> str:
     """Registered domain (e.g. example.co.uk) across tldextract versions."""
@@ -220,11 +232,42 @@ def analyze_url(raw_url: str, visible_text: str = "") -> dict:
                 hits = find_scam_keywords(registered_label)
 
                 if len(hits) >= 2 or (brand and hits):
-                    score += 15
+                    # More stacked scam words -> stronger signal.
+                    score += {0: 15, 1: 15, 2: 20, 3: 30}.get(len(hits), 35)
                     findings.append("scam_keywords_in_domain")
                     evidence.append(
                         "The domain stacks words often used in scam links "
                         f"({', '.join(hits)})."
+                    )
+
+                if registered_label.count("-") >= 3:
+                    score += 10
+                    findings.append("excessive_hyphens")
+                    evidence.append(
+                        "The domain name is a long hyphen-chained phrase, "
+                        "a common pattern in throwaway scam domains."
+                    )
+
+                tld = registered_domain.rsplit(".", 1)[-1]
+                if tld in SUSPICIOUS_TLDS:
+                    score += 15
+                    findings.append("suspicious_tld")
+                    evidence.append(
+                        f"The '.{tld}' ending is frequently used by "
+                        "short-lived scam sites. This is not proof by itself."
+                    )
+
+                path_tokens = {
+                    t for t in re.split(r"[^a-z0-9]+",
+                                        (parsed.path + " " + parsed.query).lower())
+                    if t
+                }
+                if path_tokens & SENSITIVE_PATH_WORDS:
+                    score += 10
+                    findings.append("sensitive_path")
+                    evidence.append(
+                        "The link path asks for a login, verification or "
+                        "payment step on an unrecognised domain."
                     )
 
         if host in SHORTENERS:
@@ -332,6 +375,17 @@ def analyze_urls(urls: list[dict]) -> list[dict]:
             raw_url = ""
             visible_text = ""
 
-        results.append(analyze_url(raw_url, visible_text))
+        try:
+            results.append(analyze_url(raw_url, visible_text))
+        except Exception as exc:  # never let one URL break scoring
+            print("URL analysis error:", repr(exc))
+            results.append({
+                "url": raw_url,
+                "score": 20,
+                "findings": ["url_parse_error"],
+                "evidence": ["URL could not be analysed. Treat it as unverified."],
+                "domain": None,
+                "valid": False,
+            })
 
     return results
