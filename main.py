@@ -1,6 +1,3 @@
-import os
-import time
-from collections import defaultdict, deque
 from typing import Any, List, Optional
 
 from fastapi import FastAPI, Request
@@ -10,47 +7,15 @@ from pydantic import BaseModel
 
 from redaction import redact
 from detection import run_detection
+import gemini_explainer
 from gemini_explainer import explain, fallback
+from language import resolve_language
 from formatting import build_response
 from db import save_feedback, save_analysis
 
 MAX_MESSAGE_CHARS = 5000
 
 app = FastAPI(title="TRUSTLENS API")
-
-# --- Simple per-IP rate limit so a public server can't burn through the
-# Gemini quota. Counted in memory; set RATE_LIMIT_PER_MIN to change it. ---
-RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
-_recent = defaultdict(deque)
-
-
-@app.middleware("http")
-async def rate_limit(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/analyze":
-        forwarded = request.headers.get("x-forwarded-for", "")
-        ip = forwarded.split(",")[0].strip() or (
-            request.client.host if request.client else "unknown"
-        )
-        now = time.time()
-        hits = _recent[ip]
-        while hits and now - hits[0] > 60:
-            hits.popleft()
-
-        if len(hits) >= RATE_LIMIT_PER_MIN:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too many checks in a minute. Please wait a little and try again."},
-            )
-        hits.append(now)
-
-        if len(_recent) > 5000:  # keep memory bounded
-            for key in [k for k, v in _recent.items() if not v or now - v[-1] > 60]:
-                _recent.pop(key, None)
-
-    return await call_next(request)
-
-
-# Added last so CORS is the outermost layer (it also covers error replies).
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -70,6 +35,8 @@ class AnalyzeRequest(BaseModel):
     private_mode: bool = True
     # Links sent separately by the extension: plain strings or {"url", "visible_text"}.
     urls: List[Any] = []
+    # Convenience: a single link (some clients send "url" instead of "urls").
+    url: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -81,45 +48,58 @@ class FeedbackRequest(BaseModel):
 @app.get("/health")
 def health():
     # "build" lets you confirm which version of the code is running.
-    return {"status": "ok", "build": "hosted-v3"}
-
-
-LANGUAGE_NAMES = {
-    "en": "English",
-    "hi": "Hindi",
-    "kn": "Kannada",
-}
+    # "gemini.last_error" tells you why AI explanations are failing, if they are.
+    return {
+        "status": "ok",
+        "build": "multilingual-v4",
+        "languages": ["en", "hi", "kn"],
+        "gemini": gemini_explainer.status(),
+    }
 
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     message = (req.message or "")[:MAX_MESSAGE_CHARS]
 
+    extra_urls = list(req.urls or [])
+    if req.url:
+        extra_urls.append(req.url)
+
+    # Answer in the language of the message unless the user picked one.
+    lang = resolve_language(req.language, message)
+
     detection = run_detection(
-        message, req.channel, req.claimed_identity, extra_urls=req.urls
+        message, req.channel, req.claimed_identity, extra_urls=extra_urls, lang=lang
     )
     safe_text = redact(message)
-    lang_name = LANGUAGE_NAMES.get(
-        req.language, "the same language as the message (English if unsure)"
-    )
 
     try:
-        explanation = explain(safe_text, detection, lang_name)
+        explanation = explain(safe_text, detection, lang)
     except Exception as e:
         print("Explain error:", e)
-        explanation = fallback(detection)
+        explanation = fallback(detection, lang)
 
+    # Respect the user's privacy preference.
+    # Private scans are never stored in Supabase.
     if not req.private_mode:
-        save_analysis(
+        saved = save_analysis(
             channel=req.channel,
-            language=req.language,
+            language=lang,
             risk_score=int(detection.get("risk_score", 0)),
             risk_level=str(detection.get("risk_level", "")),
             classification=str(detection.get("classification", "")),
-            signal_types=[s.get("type", "") for s in detection.get("signals", [])],
+            signal_types=[
+                s.get("type", "")
+                for s in detection.get("signals", [])
+            ],
         )
 
-    return build_response(detection, explanation)
+        if saved:
+            print("[supabase] Analysis saved successfully.")
+        else:
+            print("[supabase] Analysis could not be saved.")
+
+    return build_response(detection, explanation, lang)
 
 
 @app.post("/feedback")
