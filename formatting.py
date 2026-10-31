@@ -1,29 +1,6 @@
 """Builds the single JSON shape the browser extension displays."""
 
-
-
-# Advice shown when the AI explanation is unavailable, matched to the risk level.
-TIER_ADVICE = {
-    "HIGH": [
-        "Don't click the link, open attachments or reply to this message.",
-        "Never share OTPs, passwords, PINs, card details or your address through it.",
-        "Check the claim yourself by opening the official app or typing the company's website address directly.",
-        "Delete the message, and report it (in India: cybercrime.gov.in or call 1930) if money or details were involved.",
-    ],
-    "MODERATE": [
-        "Don't click the link or reply until you have verified the message.",
-        "Check it through the company's official app or website, typed in yourself.",
-        "Don't share personal or payment details through this message.",
-    ],
-    "LOW": [
-        "Few warning signs were found, so no urgent action is needed.",
-        "If you weren't expecting this message, check the sender through the official app or website before acting on it.",
-    ],
-    "INCONCLUSIVE": [
-        "There isn't enough in this message to judge it either way.",
-        "If it asks for money or details, verify the sender through a channel you already trust.",
-    ],
-}
+from i18n import TIER_ADVICE, SUMMARY
 
 # Always-appended generic lines from the scorer; too noisy for low-risk results.
 GENERIC_SCORER_ADVICE = {
@@ -42,14 +19,22 @@ def _dedupe(items):
     return out
 
 
-def build_response(detection: dict, explanation: dict) -> dict:
-    ai_ok = explanation.get("uncertainty") != "Explanation generated without AI."
+def build_response(detection: dict, explanation: dict, lang: str = "en") -> dict:
+    lang = lang if lang in TIER_ADVICE else "en"
+    ai_ok = bool(explanation.get("ai_generated", False))
 
     level = str(detection.get("risk_level", "")).upper()
-    tier = list(TIER_ADVICE.get(level, TIER_ADVICE["INCONCLUSIVE"]))
+    if level not in TIER_ADVICE[lang]:
+        level = "INCONCLUSIVE"
+    tier = list(TIER_ADVICE[lang][level])
 
-    # Specific advice from the detectors (e.g. about shortened links).
+    # Detector-specific advice (already translated by detection.py), minus the
+    # generic lines. English-only filter is applied on the English originals.
     specific = [
+        t for t, en in zip(detection.get("recommendations") or [],
+                           detection.get("recommendations_en") or [])
+        if en not in GENERIC_SCORER_ADVICE
+    ] if detection.get("recommendations_en") else [
         r for r in (detection.get("recommendations") or [])
         if r not in GENERIC_SCORER_ADVICE
     ]
@@ -69,12 +54,7 @@ def build_response(detection: dict, explanation: dict) -> dict:
         summary = f"{explanation['short_summary']} {explanation['explanation']}"
 
     if not ai_ok:
-        level = str(detection.get("risk_level", "")).upper()
-        summary = {
-            "HIGH": "This message shows several strong signs of a scam. Don't click the link or reply.",
-            "MODERATE": "This message has some warning signs. Verify it through an official channel before acting.",
-            "LOW": "Few warning signs were found, but stay careful with unexpected requests.",
-        }.get(level, "There isn't enough evidence for a reliable result. Verify the sender through an official channel.")
+        summary = SUMMARY[lang][level]
 
     findings = list(detection.get("findings") or [])
     if not findings:
@@ -92,4 +72,5 @@ def build_response(detection: dict, explanation: dict) -> dict:
         "evidence": findings,
         "recommendations": _dedupe(recs)[:7],
         "ai_explanation": ai_ok,
+        "language": lang,
     }
